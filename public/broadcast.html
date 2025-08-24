@@ -15,11 +15,14 @@
         <button id="startBtn">Yayını Başlat</button>
         <button id="stopBtn" disabled>Yayını Durdur</button>
       </div>
-      <p class="note">Not: iOS Safari yalnızca <b>HTTPS</b> altında kamera izni verir. Bu sayfayı HTTPS ile açtığından emin ol.</p>
+      <div class="row">
+        <label><input type="checkbox" id="audioChk"> Mikrofonu Aç</label>
+        <button id="switchCamBtn" disabled>Ön/Arka Kamera Değiştir</button>
+      </div>
+      <p class="note">iOS Safari kameraya sadece <b>HTTPS</b> altında izin verir.</p>
       <p id="status">Durum: Bekleniyor…</p>
       <p id="viewerCount">İzleyici: 0</p>
     </div>
-
     <div class="card">
       <h3>Önizleme</h3>
       <video id="preview" playsinline muted autoplay></video>
@@ -29,6 +32,8 @@
   <script>
     const startBtn = document.getElementById('startBtn');
     const stopBtn  = document.getElementById('stopBtn');
+    const switchCamBtn = document.getElementById('switchCamBtn');
+    const audioChk = document.getElementById('audioChk');
     const roomInput = document.getElementById('room');
     const statusEl = document.getElementById('status');
     const viewerCountEl = document.getElementById('viewerCount');
@@ -36,22 +41,42 @@
 
     let ws;
     let mediaStream;
-    const peerMap = new Map(); // viewerId -> RTCPeerConnection
+    let currentFacing = 'environment'; // arka kamera
+    const peerMap = new Map();
 
     const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
 
+    async function getMediaStream() {
+      const wantAudio = !!audioChk.checked;
+      const constraints = {
+        video: { facingMode: currentFacing },
+        audio: wantAudio ? { echoCancellation: true, noiseSuppression: true } : false
+      };
+      return await navigator.mediaDevices.getUserMedia(constraints);
+    }
+
+    async function replaceTracks(newStream) {
+      const newVideoTrack = newStream.getVideoTracks()[0] || null;
+      const newAudioTrack = newStream.getAudioTracks()[0] || null;
+      for (const pc of peerMap.values()) {
+        for (const s of pc.getSenders()) {
+          if (s.track && s.track.kind === 'video') await s.replaceTrack(newVideoTrack);
+          if (s.track && s.track.kind === 'audio') await s.replaceTrack(newAudioTrack || null);
+        }
+      }
+    }
+
+    function stopStreamTracks(stream) {
+      if (!stream) return;
+      for (const t of stream.getTracks()) { try { t.stop(); } catch(e){} }
+    }
+
     startBtn.onclick = async () => {
       const room = (roomInput.value || '').trim();
-      if (!room) {
-        alert('Lütfen bir oda kodu gir.');
-        return;
-      }
+      if (!room) { alert('Lütfen bir oda kodu gir.'); return; }
       try {
         statusEl.textContent = 'Durum: Kamera açılıyor…';
-        mediaStream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment' },
-          audio: false
-        });
+        mediaStream = await getMediaStream();
         preview.srcObject = mediaStream;
 
         const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -62,39 +87,24 @@
           statusEl.textContent = 'Durum: Yayın hazır. İzleyiciler bağlanabilir.';
           startBtn.disabled = true;
           stopBtn.disabled = false;
+          switchCamBtn.disabled = false;
         };
 
         ws.onmessage = async (event) => {
           const msg = JSON.parse(event.data);
-          if (msg.type === 'viewer-ready') {
-            // optional info
-          }
-          if (msg.type === 'viewerCount') {
-            viewerCountEl.textContent = 'İzleyici: ' + msg.count;
-          }
+          if (msg.type === 'viewerCount') viewerCountEl.textContent = 'İzleyici: ' + msg.count;
           if (msg.type === 'offer') {
             const { viewerId, sdp } = msg;
             let pc = new RTCPeerConnection({ iceServers });
             peerMap.set(viewerId, pc);
 
-            // Add tracks
             mediaStream.getTracks().forEach(t => pc.addTrack(t, mediaStream));
 
             pc.onicecandidate = (e) => {
-              if (e.candidate) {
-                ws.send(JSON.stringify({
-                  type: 'ice-candidate',
-                  viewerId,
-                  candidate: e.candidate
-                }));
-              }
+              if (e.candidate) ws.send(JSON.stringify({ type: 'ice-candidate', viewerId, candidate: e.candidate }));
             };
-
             pc.onconnectionstatechange = () => {
-              if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-                pc.close();
-                peerMap.delete(viewerId);
-              }
+              if (['disconnected','failed','closed'].includes(pc.connectionState)) { try { pc.close(); } catch(e){} peerMap.delete(viewerId); }
             };
 
             await pc.setRemoteDescription(new RTCSessionDescription(sdp));
@@ -105,22 +115,15 @@
           if (msg.type === 'ice-candidate') {
             const { viewerId, candidate } = msg;
             const pc = peerMap.get(viewerId);
-            if (pc && candidate) {
-              try { await pc.addIceCandidate(candidate); } catch (e) {}
-            }
+            if (pc && candidate) { try { await pc.addIceCandidate(candidate); } catch(e){} }
           }
           if (msg.type === 'viewer-left') {
             const pc = peerMap.get(msg.viewerId);
-            if (pc) {
-              try { pc.close(); } catch(e){}
-              peerMap.delete(msg.viewerId);
-            }
+            if (pc) { try { pc.close(); } catch(e){} peerMap.delete(msg.viewerId); }
           }
         };
 
-        ws.onclose = () => {
-          statusEl.textContent = 'Durum: Bağlantı kapandı.';
-        };
+        ws.onclose = () => { statusEl.textContent = 'Durum: Bağlantı kapandı.'; };
       } catch (err) {
         console.error(err);
         alert('Kamera açılamadı: ' + err.message);
@@ -129,26 +132,35 @@
     };
 
     stopBtn.onclick = () => {
-      // Close all peers
-      for (const pc of peerMap.values()) {
-        try { pc.close(); } catch(e){}
-      }
+      for (const pc of peerMap.values()) { try { pc.close(); } catch(e){} }
       peerMap.clear();
-
-      // Stop media
-      if (mediaStream) {
-        mediaStream.getTracks().forEach(t => t.stop());
-        preview.srcObject = null;
-      }
-
-      // Close WS
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.close();
-      }
-
+      if (mediaStream) { stopStreamTracks(mediaStream); preview.srcObject = null; mediaStream = null; }
+      if (ws && ws.readyState === WebSocket.OPEN) ws.close();
       statusEl.textContent = 'Durum: Durduruldu';
-      startBtn.disabled = false;
-      stopBtn.disabled = true;
+      startBtn.disabled = false; stopBtn.disabled = true; switchCamBtn.disabled = true;
+    };
+
+    audioChk.onchange = async () => {
+      if (!mediaStream) return;
+      try {
+        const newStream = await getMediaStream();
+        await replaceTracks(newStream);
+        preview.srcObject = newStream;
+        stopStreamTracks(mediaStream);
+        mediaStream = newStream;
+      } catch(e){ console.error(e); }
+    };
+
+    switchCamBtn.onclick = async () => {
+      if (!mediaStream) return;
+      currentFacing = currentFacing === 'environment' ? 'user' : 'environment';
+      try {
+        const newStream = await getMediaStream();
+        await replaceTracks(newStream);
+        preview.srcObject = newStream;
+        stopStreamTracks(mediaStream);
+        mediaStream = newStream;
+      } catch(e){ console.error(e); }
     };
   </script>
 </body>

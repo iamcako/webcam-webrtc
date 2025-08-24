@@ -15,32 +15,34 @@
         <button id="connectBtn">İzlemeye Başla</button>
         <button id="hangupBtn" disabled>Bağlantıyı Kes</button>
       </div>
+      <div class="row">
+        <button id="muteBtn" disabled>Sesi Aç</button>
+      </div>
       <p id="status">Durum: Bekleniyor…</p>
     </div>
 
     <div class="card">
       <h3>Canlı Yayın</h3>
       <video id="remoteVideo" playsinline autoplay muted></video>
-      <p class="note">Eğer video otomatik başlamazsa dokunarak başlat.</p>
+      <p class="note">Video başlamazsa dokun. iOS’ta ses başlangıçta kapalıdır; “Sesi Aç” ile aç.</p>
     </div>
   </main>
 
   <script>
     const connectBtn = document.getElementById('connectBtn');
     const hangupBtn  = document.getElementById('hangupBtn');
+    const muteBtn    = document.getElementById('muteBtn');
     const roomInput  = document.getElementById('room');
     const statusEl   = document.getElementById('status');
     const remoteVideo = document.getElementById('remoteVideo');
 
-    let ws;
-    let pc;
+    let ws; let pc;
     const viewerId = (crypto.randomUUID && crypto.randomUUID()) || Math.random().toString(36).slice(2);
     const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
 
     connectBtn.onclick = async () => {
       const room = (roomInput.value || '').trim();
       if (!room) { alert('Oda kodu gir'); return; }
-
       const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
       ws = new WebSocket(`${wsProto}://${location.host}/ws`);
 
@@ -52,13 +54,12 @@
         pc.ontrack = (event) => {
           if (remoteVideo.srcObject !== event.streams[0]) {
             remoteVideo.srcObject = event.streams[0];
+            muteBtn.disabled = false;
           }
         };
 
         pc.onicecandidate = (e) => {
-          if (e.candidate) {
-            ws.send(JSON.stringify({ type: 'ice-candidate', candidate: e.candidate }));
-          }
+          if (e.candidate) ws.send(JSON.stringify({ type: 'ice-candidate', candidate: e.candidate }));
         };
 
         const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
@@ -75,37 +76,34 @@
           statusEl.textContent = 'Durum: Bağlandı.';
         }
         if (msg.type === 'ice-candidate') {
-          if (msg.candidate) {
-            try { await pc.addIceCandidate(msg.candidate); } catch (e) {}
-          }
+          if (msg.candidate) { try { await pc.addIceCandidate(msg.candidate); } catch(e){} }
         }
-        if (msg.type === 'end') {
-          statusEl.textContent = 'Durum: Yayıncı ayrıldı.';
-          cleanup();
-        }
-        if (msg.type === 'error') {
-          statusEl.textContent = 'Hata: ' + msg.message;
-        }
+        if (msg.type === 'end') { statusEl.textContent = 'Durum: Yayıncı ayrıldı.'; cleanup(); }
+        if (msg.type === 'error') { statusEl.textContent = 'Hata: ' + msg.message; }
       };
 
-      ws.onclose = () => {
-        statusEl.textContent = 'Durum: Bağlantı kapandı.';
-      };
+      ws.onclose = () => { statusEl.textContent = 'Durum: Bağlantı kapandı.'; };
     };
 
     function cleanup() {
-      if (pc) {
-        try { pc.close(); } catch(e){}
-        pc = null;
-      }
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.close();
-      }
+      if (pc) { try { pc.close(); } catch(e){} pc = null; }
+      if (ws && ws.readyState === WebSocket.OPEN) ws.close();
       connectBtn.disabled = false;
       hangupBtn.disabled = true;
+      muteBtn.disabled = true;
     }
 
     hangupBtn.onclick = cleanup;
+
+    muteBtn.onclick = () => {
+      if (remoteVideo.muted) {
+        remoteVideo.muted = false; remoteVideo.volume = 1.0;
+        muteBtn.textContent = 'Sesi Kapat';
+      } else {
+        remoteVideo.muted = true;
+        muteBtn.textContent = 'Sesi Aç';
+      }
+    };
   </script>
 </body>
 </html>
