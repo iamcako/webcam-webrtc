@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>DMS – Broadcast (iPhone)</title>
+  <link rel="stylesheet" href="/style.css"/>
+</head>
+<body>
+  <main>
+    <h1>iPhone → Canlı Yayın (WebRTC)</h1>
+    <div class="card">
+      <label>Oda Kodu (ör. sabah-spor): <input id="room" placeholder="sabah-spor" /></label>
+      <div class="row">
+        <button id="startBtn">Yayını Başlat</button>
+        <button id="stopBtn" disabled>Yayını Durdur</button>
+      </div>
+      <p class="note">Not: iOS Safari yalnızca <b>HTTPS</b> altında kamera izni verir. Bu sayfayı HTTPS ile açtığından emin ol.</p>
+      <p id="status">Durum: Bekleniyor…</p>
+      <p id="viewerCount">İzleyici: 0</p>
+    </div>
+
+    <div class="card">
+      <h3>Önizleme</h3>
+      <video id="preview" playsinline muted autoplay></video>
+    </div>
+  </main>
+
+  <script>
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn  = document.getElementById('stopBtn');
+    const roomInput = document.getElementById('room');
+    const statusEl = document.getElementById('status');
+    const viewerCountEl = document.getElementById('viewerCount');
+    const preview = document.getElementById('preview');
+
+    let ws;
+    let mediaStream;
+    const peerMap = new Map(); // viewerId -> RTCPeerConnection
+
+    const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+
+    startBtn.onclick = async () => {
+      const room = (roomInput.value || '').trim();
+      if (!room) {
+        alert('Lütfen bir oda kodu gir.');
+        return;
+      }
+      try {
+        statusEl.textContent = 'Durum: Kamera açılıyor…';
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' },
+          audio: false
+        });
+        preview.srcObject = mediaStream;
+
+        const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+        ws = new WebSocket(`${wsProto}://${location.host}/ws`);
+
+        ws.onopen = () => {
+          ws.send(JSON.stringify({ type: 'join', role: 'broadcaster', room }));
+          statusEl.textContent = 'Durum: Yayın hazır. İzleyiciler bağlanabilir.';
+          startBtn.disabled = true;
+          stopBtn.disabled = false;
+        };
+
+        ws.onmessage = async (event) => {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'viewer-ready') {
+            // optional info
+          }
+          if (msg.type === 'viewerCount') {
+            viewerCountEl.textContent = 'İzleyici: ' + msg.count;
+          }
+          if (msg.type === 'offer') {
+            const { viewerId, sdp } = msg;
+            let pc = new RTCPeerConnection({ iceServers });
+            peerMap.set(viewerId, pc);
+
+            // Add tracks
+            mediaStream.getTracks().forEach(t => pc.addTrack(t, mediaStream));
+
+            pc.onicecandidate = (e) => {
+              if (e.candidate) {
+                ws.send(JSON.stringify({
+                  type: 'ice-candidate',
+                  viewerId,
+                  candidate: e.candidate
+                }));
+              }
+            };
+
+            pc.onconnectionstatechange = () => {
+              if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+                pc.close();
+                peerMap.delete(viewerId);
+              }
+            };
+
+            await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            ws.send(JSON.stringify({ type: 'answer', viewerId, sdp: answer }));
+          }
+          if (msg.type === 'ice-candidate') {
+            const { viewerId, candidate } = msg;
+            const pc = peerMap.get(viewerId);
+            if (pc && candidate) {
+              try { await pc.addIceCandidate(candidate); } catch (e) {}
+            }
+          }
+          if (msg.type === 'viewer-left') {
+            const pc = peerMap.get(msg.viewerId);
+            if (pc) {
+              try { pc.close(); } catch(e){}
+              peerMap.delete(msg.viewerId);
+            }
+          }
+        };
+
+        ws.onclose = () => {
+          statusEl.textContent = 'Durum: Bağlantı kapandı.';
+        };
+      } catch (err) {
+        console.error(err);
+        alert('Kamera açılamadı: ' + err.message);
+        statusEl.textContent = 'Durum: Hata';
+      }
+    };
+
+    stopBtn.onclick = () => {
+      // Close all peers
+      for (const pc of peerMap.values()) {
+        try { pc.close(); } catch(e){}
+      }
+      peerMap.clear();
+
+      // Stop media
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(t => t.stop());
+        preview.srcObject = null;
+      }
+
+      // Close WS
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+
+      statusEl.textContent = 'Durum: Durduruldu';
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+    };
+  </script>
+</body>
+</html>
